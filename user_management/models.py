@@ -115,7 +115,7 @@ class MenuBooking(models.Model):
         return self.menu.price * self.quantity
 
     def __str__(self):
-        return f"{self.quantity} x {self.menu.name} for booking #{self.booking.id}"
+        return f"{self.quantity} x {self.menu.name}"
 
 
 class Billing(models.Model):
@@ -222,6 +222,6 @@ class Address(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.user.username} - {self.get_address_type_display()} Address"
+        return f"{self.user} - {self.get_address_type_display()} Address"
 
 

@@ -8,7 +8,7 @@ from .models import Notification, SpecialRequestMessage
 def create_notification(sender, instance, created, **kwargs):
     if created:
         menu_booking = instance.booking
-        restaurant = menu_booking.booking.restaurant
+        restaurant = menu_booking.table.restaurant
         table_number = menu_booking.table.table_number
 
         title = "New Special Request"

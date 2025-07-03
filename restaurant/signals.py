@@ -42,7 +42,7 @@ def generate_or_trim_tables(sender, instance, created, **kwargs):
     if target_count > existing_count:
         for i in range(existing_count + 1, target_count + 1):
             table_number = f"TBL-{i:03d}"
-            qr_data = f"{restaurant.name} - Table {table_number}"
+            qr_data = f"https://kaiztren.pythonanywhere.com/restaurant/menu/"
 
             qr = qrcode.make(qr_data)
             buffer = BytesIO()

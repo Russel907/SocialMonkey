@@ -66,6 +66,7 @@ class RestaurantSerializer(serializers.ModelSerializer):
 
 class serverSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
+    re_enter_password = serializers.CharField(write_only=True)
     full_name = serializers.CharField()
     phone_number = serializers.CharField()
     email = serializers.EmailField()
@@ -78,12 +79,14 @@ class serverSerializer(serializers.Serializer):
     def validate_phone_number(self, value):
         if not value.isdigit() or len(value) != 10:
             raise serializers.ValidationError("Enter a valid 10-digit phone number.")
+        if Server.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError("Phone number already in use.")
         return value
 
-    def validate_password(self, value):
-        if len(value) < 8:
-            raise serializers.ValidationError("Password must be at least 8 characters long.")
-        return value
+    def validate(self, data):
+        if data['password'] != data['re_enter_password']:
+            raise serializers.ValidationError("Passwords do not match.")
+        return data
 
     def create(self, validated_data):
         request = self.context.get('request')
@@ -94,7 +97,7 @@ class serverSerializer(serializers.Serializer):
         restaurant = owner.staff_profile.restaurant
 
         email = validated_data['email']
-        password = validated_data['password']  
+        password = validated_data['password']
 
         user = User.objects.create_user(
             username=email,
@@ -107,6 +110,7 @@ class serverSerializer(serializers.Serializer):
             restaurant=restaurant,
             role='server'
         )
+
         Server.objects.create(
             profile=staff_profile,
             full_name=validated_data['full_name'],
@@ -114,6 +118,7 @@ class serverSerializer(serializers.Serializer):
         )
 
         return user
+
 
 
 class MenuSerializer(serializers.ModelSerializer):
@@ -139,7 +144,7 @@ class TableSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Table   
-        fields = ['id', 'table_number', 'qr_code']
+        fields = ['id', 'table_number', 'qr_code', 'booking_status']
 
     def validate_table_number(self, value):
         if Table.objects.filter(table_number=value).exists():
@@ -153,22 +158,26 @@ class SeatSerializer(serializers.ModelSerializer):
         fields = ['id', 'total_seats', 'start_time', 'end_time', 'interval_minutes']
 
     def validate(self, data):
-        restaurant = data.get('restaurant')
-        start_time = data.get('start_time')
-        end_time = data.get('end_time')
+        # Use instance values if fields are not in data (for partial updates)
+        start_time = data.get('start_time', getattr(self.instance, 'start_time', None))
+        end_time = data.get('end_time', getattr(self.instance, 'end_time', None))
+        restaurant = getattr(self.instance, 'restaurant', None) or data.get('restaurant')
 
-        if start_time >= end_time:
-            raise serializers.ValidationError("End time must be after start time.")
+        # Only validate time comparison if both are present
+        if start_time and end_time:
+            if start_time >= end_time:
+                raise serializers.ValidationError("End time must be after start time.")
+        elif 'start_time' in data or 'end_time' in data:
+            raise serializers.ValidationError("Both start_time and end_time are required to update time range.")
 
-        if Seats.objects.filter(
+        if start_time and end_time and Seats.objects.filter(
             restaurant=restaurant,
             start_time=start_time,
             end_time=end_time
-        ).exists():
+        ).exclude(id=self.instance.id if self.instance else None).exists():
             raise serializers.ValidationError("A seat configuration with this time range already exists for this restaurant.")
 
         return data
-
 
 class PaymentSerializer(serializers.ModelSerializer):
     upi_id = serializers.CharField(max_length=255, required=True)
@@ -221,7 +230,7 @@ class GallerySerializer(serializers.ModelSerializer):
 class Performanceserializer(serializers.ModelSerializer):
     class Meta:
         model = Performance
-        fields = ['id', 'restaurant', 'entry','theme', 'date', 'start_time','image']
+        fields = ['id', 'restaurant', 'entry','theme', 'date', 'entry_fee', 'start_time','image']
         read_only_fields = ['restaurant']
 
 

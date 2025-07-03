@@ -90,261 +90,6 @@ class RestaurantListView(APIView):
         return Response(serializer.data)
 
 
-class BookingView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        bookings = Booking.objects.filter(user=profile).order_by('-booking_date')
-        serializer = BookingSerializer(bookings, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        table_id = request.data.get('table')
-        try:
-            table = Table.objects.get(id=table_id)
-            if table.booking_status:
-                return Response({"error": "This table is already booked."}, status=status.HTTP_400_BAD_REQUEST)
-        except Table.DoesNotExist:
-            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = BookingSerializer(data=request.data)
-        if serializer.is_valid():
-            restaurant_id = request.data.get('restaurant')
-
-            # Mark table as booked
-            table.booking_status = True
-            table.save()
-
-            # Save booking
-            serializer.save(user=profile, restaurant_id=restaurant_id, table_id=table.id)
-
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class MenuBookingView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, pk=None):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-        if not pk:
-            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        menu_bookings = MenuBooking.objects.filter(booking_id=pk)
-        if not menu_bookings.exists():
-            menu_bookings = MenuBooking.objects.filter(table_id=pk)
-
-        if not menu_bookings.exists():
-            return Response({"error": "No menu bookings found for this Booking or Table."}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = MenuBookingSerializer(menu_bookings, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def post(self, request):
-        serializer = MenuBookingSerializer(data=request.data)
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-        
-        if serializer.is_valid():
-            booking = serializer.validated_data.get("booking")
-            table = serializer.validated_data.get("table")
-
-            if not booking and not table:
-                return Response({"error": "Either Booking or Table must be provided."}, status=status.HTTP_400_BAD_REQUEST)
-
-            menu_booking = serializer.save()
-            if table:
-                table.booking_status = True
-                table.save()
-
-            return Response({
-                "message": "Menu item added successfully.",
-                "user": profile.user.username,
-                "data": MenuBookingSerializer(menu_booking).data
-            }, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class BillingView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, pk=None):
-        if not pk:
-            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            billing = Billing.objects.get(booking_id=pk)
-        except Billing.DoesNotExist:
-            try:
-                billing = Billing.objects.get(table_id=pk)
-            except Billing.DoesNotExist:
-                return Response({"error": "Billing not found for this booking."}, status=status.HTTP_404_NOT_FOUND)
-        serializer = BillingSerializer(billing)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def post(self, request):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-        
-        booking_id = request.data.get('booking')
-        table_id = request.data.get('table')
-        booking = None
-        table = None
-        if not booking_id and not table_id:
-            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            if booking_id:
-                booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
-            if table_id:
-                table = Table.objects.get(id=table_id)
-            billing = None
-            if booking:
-                billing = Billing.objects.filter(booking=booking).first()
-            if not billing and table:
-                billing = Billing.objects.filter(table=table).first()
-            if billing:
-                if booking and not billing.booking:
-                    billing.booking = booking
-                if table and not billing.table:
-                    billing.table = table
-                billing.save()
-            else:
-                billing = Billing.objects.create(
-                    booking=booking,
-                    table=table
-                )
-
-
-            serializer = BillingSerializer(billing)
-            return Response({
-                "message": "Billing generated successfully.",
-                "user": profile.user.username,
-                "data": serializer.data
-            }, status=status.HTTP_201_CREATED)
-
-        except SeatBooking.DoesNotExist:
-            return Response({"error": "Booking not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
-
-        except Table.DoesNotExist:
-            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
-
-
-class AvailableTableByRestaurent(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        restaurant_id = request.data.get('restaurant_id')
-
-        if not restaurant_id:
-            return Response({"error": "Restaurant ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        restaurant = get_object_or_404(Restaurant, id=restaurant_id)
-        tables = Table.objects.filter(restaurant=restaurant, booking_status=False)
-        serializer = TableSerializer(tables, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-class ReviewView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        serializer = ReviewSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save(user=profile)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def get(self, request):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        reviews = Review.objects.filter(user=profile)
-        serializer = ReviewSerializer(reviews, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def delete(self, request, pk=None):
-        if not pk:
-            return Response({"error": "Review ID (pk) is required to delete."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-            
-        review = get_object_or_404(Review, pk=pk, user=profile)
-        review.delete()
-        return Response({"message": "Review deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
-
-
-class SpecialRequestForSeatView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        booking_id = request.data.get('booking')
-        message = request.data.get('message')
-
-        if not booking_id or not message:
-            return Response({"error": "Booking ID and message are required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            booking = MenuBooking.objects.get(id=booking_id, user=request.user.customer_profile)
-            special_request, created = SpecialRequestForSeat.objects.get_or_create(booking=booking, defaults={'message': message})
-            if not created:
-                special_request.message = message
-                special_request.save()
-
-            return Response({
-                "message": "Special request saved successfully.",
-                "data": SpecialRequestForSeatSerializer(special_request).data
-            }, status=status.HTTP_201_CREATED)
-
-        except SeatBooking.DoesNotExist:
-            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    def get(self, request):
-        try:
-            profile = request.user.customer_profile
-        except CustomerProfile.DoesNotExist:
-            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        special_requests = SpecialRequestForSeat.objects.filter(booking__user=profile)
-        serializer = SpecialRequestForSeatSerializer(special_requests, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-
 class SeatBookingView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -547,6 +292,105 @@ class ConfirmPaymentView(APIView):
                 return Response({"error": "Seats not available anymore."}, status=status.HTTP_400_BAD_REQUEST)
 
 
+class SpecialRequestForSeatView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+
+    def post(self, request):
+        booking_id = request.data.get('booking')  # This should be the SeatBooking ID
+        message = request.data.get('message')
+        print("data:", request.data)
+
+        if not booking_id or not message:
+            return Response({"error": "Booking ID and message are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Fetch the SeatBooking using booking ID and user
+            booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
+
+            # Get or create special request associated with SeatBooking
+            special_request, created = SpecialRequestForSeat.objects.get_or_create(
+                booking=booking,
+                defaults={'message': message}
+            )
+
+            if not created:
+                special_request.message = message
+                special_request.save()
+
+            return Response({
+                "message": "Special request saved successfully.",
+                "data": SpecialRequestForSeatSerializer(special_request).data
+            }, status=status.HTTP_201_CREATED)
+
+        except SeatBooking.DoesNotExist:
+            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    def get(self, request):
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Filter special requests based on SeatBooking and user
+        special_requests = SpecialRequestForSeat.objects.filter(booking__user=profile)
+        serializer = SpecialRequestForSeatSerializer(special_requests, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MenuBookingView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk=None):
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not pk:
+            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        menu_bookings = MenuBooking.objects.filter(booking_id=pk)
+        if not menu_bookings.exists():
+            menu_bookings = MenuBooking.objects.filter(table_id=pk)
+
+        if not menu_bookings.exists():
+            return Response({"error": "No menu bookings found for this Booking or Table."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = MenuBookingSerializer(menu_bookings, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = MenuBookingSerializer(data=request.data)
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+        if serializer.is_valid():
+            booking = serializer.validated_data.get("booking")
+            table = serializer.validated_data.get("table")
+
+            if not booking and not table:
+                return Response({"error": "Either Booking or Table must be provided."}, status=status.HTTP_400_BAD_REQUEST)
+            if table.booking_status == True:
+                return Response ({"error": "The Table already booked"}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                menu_booking = serializer.save()
+                if table:
+                    table.booking_status = True
+                    table.save()
+
+            return Response({
+                "message": "Menu item added successfully.",
+                "user": profile.user.username,
+                "data": MenuBookingSerializer(menu_booking).data
+            }, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 class SpecialRequestMessageView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -590,6 +434,158 @@ class SpecialRequestMessageView(APIView):
 
         serializer = SpecialRequestMessageSerializer(messages, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class BillingView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk=None):
+        if not pk:
+            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            billing = Billing.objects.get(booking_id=pk)
+        except Billing.DoesNotExist:
+            try:
+                billing = Billing.objects.get(table_id=pk)
+            except Billing.DoesNotExist:
+                return Response({"error": "Billing not found for this booking."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = BillingSerializer(billing)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+        booking_id = request.data.get('booking')
+        table_id = request.data.get('table')
+        booking = None
+        table = None
+        if not booking_id and not table_id:
+            return Response({"error": "Booking ID or Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            if booking_id:
+                booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
+            if table_id:
+                table = Table.objects.get(id=table_id)
+            billing = None
+            if booking:
+                billing = Billing.objects.filter(booking=booking).first()
+            if not billing and table:
+                billing = Billing.objects.filter(table=table).first()
+            if billing:
+                if booking and not billing.booking:
+                    billing.booking = booking
+                if table and not billing.table:
+                    billing.table = table
+                billing.save()
+            else:
+                billing = Billing.objects.create(
+                    booking=booking,
+                    table=table
+                )
+
+
+            serializer = BillingSerializer(billing)
+            return Response({
+                "message": "Billing generated successfully.",
+                "user": profile.user.username,
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+
+        except SeatBooking.DoesNotExist:
+            return Response({"error": "Booking not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
+
+        except Table.DoesNotExist:
+            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+
+class CompleteOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+    def post(self, request):
+        booking_id = request.data.get("booking")
+        table_id = request.data.get("table")
+
+        if not booking_id and not table_id:
+            return Response({"error": "Booking ID ot Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        billing = None
+
+        try:
+            if booking_id:
+                booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
+                billing =  Billing.objects.filter(booking=booking).first()
+            if not billing and table_id:
+                table = Table.objects.get(id=table_id)
+                billing = Billing.objects.filter(table=table).first()
+            if not billing:
+                return Response({"error": "Billing not found for this booking or table."}, status=status.HTTP_404_NOT_FOUND)
+
+            billing.complete_order = True
+            billing.save()
+            table.booking_status = False
+            table.save()
+
+            return Response({
+                "message": "Order marked as completed successfully.",
+                "booking_id": billing.booking.id if billing.booking else None,
+                "table_id": billing.table.id if billing.table else None,
+                "final_amount_paid": billing.final_amount_to_pay
+            }, status=status.HTTP_200_OK)
+
+        
+        except SeatBooking.DoesNotExist:
+            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        except Table.DoesNotExist:
+            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ReviewView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(user=profile)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def get(self, request):
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reviews = Review.objects.filter(user=profile)
+        serializer = ReviewSerializer(reviews, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk=None):
+        if not pk:
+            return Response({"error": "Review ID (pk) is required to delete."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            profile = request.user.customer_profile
+        except CustomerProfile.DoesNotExist:
+            return Response({"error": "Customer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        review = get_object_or_404(Review, pk=pk, user=profile)
+        review.delete()
+        return Response({"message": "Review deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
 
 
 class NotificationView(APIView):
@@ -657,46 +653,6 @@ class AddressView(APIView):
         address = get_object_or_404(Address, pk=pk, user=request.user.customer_profile)
         address.delete()
         return Response({"message": "Address deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
-
-
-class CompleteOrderView(APIView):
-    permission_classes = [IsAuthenticated]
-    authentication_classes = [TokenAuthentication]
-    def post(self, request):
-        booking_id = request.data.get("booking")
-        table_id = request.data.get("table")
-
-        if not booking_id and not table_id:
-            return Response({"error": "Booking ID ot Table ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        billing = None
-
-        try:
-            if booking_id:
-                booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
-                billing =  Billing.objects.filter(booking=booking).first()
-            if not billing and table_id:
-                table = Table.objects.get(id=table_id)
-                billing = Billing.objects.filter(table=table).first()
-            if not billing:
-                return Response({"error": "Billing not found for this booking or table."}, status=status.HTTP_404_NOT_FOUND)
-
-            billing.complete_order = True
-            billing.save()
-
-            return Response({
-                "message": "Order marked as completed successfully.",
-                "booking_id": billing.booking.id if billing.booking else None,
-                "table_id": billing.table.id if billing.table else None,
-                "final_amount_paid": billing.final_amount_to_pay
-            }, status=status.HTTP_200_OK)
-
-        
-        except SeatBooking.DoesNotExist:
-            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        except Table.DoesNotExist:
-            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
 
 
 class CancelSeatBookingView(APIView):

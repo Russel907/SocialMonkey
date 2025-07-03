@@ -1,13 +1,11 @@
 from django.contrib import admin
 from django.urls import path
-from .views import CustomerProfileView, EditProfile, BookingView, MenuBookingView, BillingView, AvailableTableByRestaurent, RestaurantListView, SeatBookingView, ReviewView, ConfirmPaymentView, SpecialRequestForSeatView, SpecialRequestMessageView, NotificationView, AddressView, CompleteOrderView, CancelSeatBookingView
+from .views import CustomerProfileView, EditProfile, MenuBookingView, BillingView, RestaurantListView, SeatBookingView, ReviewView, ConfirmPaymentView, SpecialRequestForSeatView, SpecialRequestMessageView, NotificationView, AddressView, CompleteOrderView, CancelSeatBookingView
 
 urlpatterns = [
     path('login/', CustomerProfileView.as_view(), name="login"),
     path('edit_profile/<int:pk>/', EditProfile.as_view(), name='profile-update'),
     path('restaurant_list/', RestaurantListView.as_view(), name='restaurant_list'),
-    path('available_tables', AvailableTableByRestaurent.as_view(), name='available-tables'),
-    path('bookings/', BookingView.as_view(), name='bookings'),
     path('menu_bookings/', MenuBookingView.as_view(), name='menu-bookings'),
     path('menu_bookings/<int:pk>/', MenuBookingView.as_view(), name='menu-bookings-detail'),
     path('billing/', BillingView.as_view(), name='billing'),

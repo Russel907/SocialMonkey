@@ -7,11 +7,12 @@ from rest_framework.authentication import TokenAuthentication
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.utils import timezone
+from django.utils.timezone import localtime
 from datetime import datetime, timedelta
 from django.shortcuts import get_object_or_404
-from .models import Restaurant, Menu, Table, Payment, Timing, Seats, SeatSlot, Gallery, Performance, Offer, DiningOffer, TableConfig, RestaurantStaffProfile, Server
+from .models import Restaurant, Menu, Table, TableConfig, Payment, Timing, Seats, SeatSlot, Gallery, Performance, Offer, DiningOffer, TableConfig, RestaurantStaffProfile, Server
 from .serializers import RestaurantSerializer, MenuSerializer, TableSerializer, PaymentSerializer, TimingSerializer, SeatSerializer, SeatSlotSerializer, GallerySerializer, Performanceserializer, OfferSerializer, DiningOfferSerializer, TableConfigSerializer, serverSerializer
-
+from user_management.models import MenuBooking, SpecialRequestMessage, SeatBooking, SpecialRequestForSeat
 
 class RestaurantRegisterView(APIView):
     def post(self, request):
@@ -71,6 +72,7 @@ class RestaurantLoginView(APIView):
                 'message': 'Login successful (restaurant owner)',
                 'token': token.key,
                 'role': 'owner',
+                'email': email,
                 'restaurant': serializer.data
             }, status=status.HTTP_200_OK)
 
@@ -119,6 +121,7 @@ class CreateServerView(APIView):
                 'message': 'Server account created successfully.',
                 'server_username': user.username,
                 'server_phone_number': request.data.get('phone_number'),
+                'server_full_name': request.data.get('full_name'),
                 'server_role': staff_profile.role,
                 'server_id': user.id,
                 'server_email': user.email,
@@ -126,22 +129,45 @@ class CreateServerView(APIView):
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def put(self, request, pk=None):
-        if not pk:
-            return Response({"error": "Server user ID is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+class ServerDetailView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk):
         user = get_object_or_404(User, pk=pk)
         staff_profile = get_object_or_404(RestaurantStaffProfile, user=user, role='server')
         server = get_object_or_404(Server, profile=staff_profile)
+        return user, staff_profile, server
+
+    def get(self, request, pk):
+        user, staff_profile, server = self.get_object(pk)
+        return Response({
+            'server_id': user.id,
+            'server_username': user.username,
+            'server_email': user.email,
+            'full_name': server.full_name,
+            'phone_number': server.phone_number,
+            'server_password': user.password,
+            'role': staff_profile.role,
+        })
+
+    def put(self, request, pk):
+        user, staff_profile, server = self.get_object(pk)
+
+        # Validate unique phone number
+        new_phone = request.data.get('phone_number', server.phone_number)
+        if Server.objects.filter(phone_number=new_phone).exclude(id=server.id).exists():
+            return Response({"error": "Phone number already in use."}, status=status.HTTP_400_BAD_REQUEST)
 
         user.username = request.data.get('username', user.username)
         user.email = request.data.get('email', user.email)
         if request.data.get('password'):
-            user.set_password(request.data.get('password'))  
+            user.set_password(request.data.get('password'))
         user.save()
 
         server.full_name = request.data.get('full_name', server.full_name)
-        server.phone_number = request.data.get('phone_number', server.phone_number)
+        server.phone_number = new_phone
         server.save()
 
         return Response({
@@ -149,19 +175,17 @@ class CreateServerView(APIView):
             'server_username': user.username,
             'full_name': server.full_name,
             'phone_number': server.phone_number
-        }, status=status.HTTP_200_OK)
+        })
 
-    def delete(self, request, pk=None):
-        if not pk:
-            return Response({"error": "Server user ID is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = get_object_or_404(User, pk=pk)
-        staff_profile = get_object_or_404(RestaurantStaffProfile, user=user, role='server')
-        Server.objects.filter(profile=staff_profile).delete()
+    def delete(self, request, pk):
+        user, staff_profile, server = self.get_object(pk)
+        server.delete()
         staff_profile.delete()
         user.delete()
-
         return Response({"message": "Server account deleted."}, status=status.HTTP_204_NO_CONTENT)
+
+
 class MenuCreateListView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -275,7 +299,19 @@ class TableConfigView(APIView):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)  
+    
+    def delete(self, request, pk=None):
+        if not pk:
+            return Response({"error": "Table ID (pk) is required to delete."}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            restaurant = Restaurant.objects.get(user=request.user)
+        except Restaurant.DoesNotExist:
+            return Response({"error": "Restaurant profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        tableconfig = get_object_or_404(TableConfig, pk=pk, restaurant=restaurant)
+        tableconfig.delete()
+        return Response({"message": "Table deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
 
 
 class TableCreateView(APIView):
@@ -818,3 +854,102 @@ class DiningOfferView(APIView):
                 "dining_offer": serializer.data
             }, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+class TableOrderListView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            restaurant = Restaurant.objects.get(user=request.user)
+        except Restaurant.DoesNotExist:
+            return Response({"error": "Restaurant not found."}, status=404)
+
+        menu_bookings = MenuBooking.objects.filter(table__restaurant=restaurant).select_related(
+            'booking__user__user', 'menu', 'table'
+        )
+
+        grouped_orders = {}
+
+        for booking in menu_bookings:
+            key = f"{booking.table.id}_{booking.booking.id if booking.booking else 'null'}"
+
+            if key not in grouped_orders:
+                special_request = SpecialRequestMessage.objects.filter(booking__table=booking.table).first()
+
+                grouped_orders[key] = {
+                    "table_no": booking.table.table_number,
+                    "user": booking.booking.user.user.username if booking.booking else None,
+                    "user_phone": booking.booking.user.user.username if booking.booking else None,
+                    "created_at": localtime(booking.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                    "special_request": special_request.message if special_request else "",
+                    "menu": [],
+                    "total_bill": 0
+                }
+
+            grouped_orders[key]["menu"].append({
+                "menu_name": booking.menu.name,
+                "qty": booking.quantity,
+                "price": booking.menu.price,
+                "total": booking.quantity * booking.menu.price
+            })
+
+            grouped_orders[key]["total_bill"] += booking.quantity * booking.menu.price
+
+        return Response(list(grouped_orders.values()), status=200)
+
+
+
+class SeatOrderListView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            restaurant = Restaurant.objects.get(user=request.user)
+        except Restaurant.DoesNotExist:
+            return Response({"error": "Restaurant not found."}, status=404)
+
+        seat_bookings = SeatBooking.objects.filter(restaurant=restaurant).select_related(
+            'user__user', 'seat_slot'
+        )
+
+        data = []
+        for booking in seat_bookings:
+            data.append({
+                "booking_id": booking.id,
+                "number_of_guests": booking.number_of_guests,
+                "date": booking.seat_slot.date.strftime("%Y-%m-%d"),
+                "time_slot": f"{booking.seat_slot.start_time.strftime('%H:%M')} - {booking.seat_slot.end_time.strftime('%H:%M')}",
+                "user_phone_number": booking.user.user.username
+            })
+        return Response(data, status=200)
+
+
+class SeatBookingDetailView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        booking = get_object_or_404(SeatBooking.objects.select_related('user__user', 'seat_slot', 'restaurant'), pk=pk)
+
+        if booking.restaurant.user != request.user:
+            return Response({"error": "You are not authorized to view this booking."}, status=HTTP_404_NOT_FOUND)
+
+        special_request_seat = SpecialRequestForSeat.objects.filter(booking=booking).first()
+
+        data = {
+            "booking_id": booking.id,
+            "restaurant": booking.restaurant.name,
+            "number_of_guests": booking.number_of_guests,
+            "date": booking.seat_slot.date.strftime("%Y-%m-%d"),
+            "time_slot": f"{booking.seat_slot.start_time.strftime('%H:%M')} - {booking.seat_slot.end_time.strftime('%H:%M')}",
+            "user_phone_number": booking.user.user.username,
+            "total_advance_payment": str(booking.total_advance_payment),
+            "payment_status": booking.payment_status,
+            "special_request": special_request_seat.message if special_request_seat else ""
+        }
+
+        return Response(data, status=200)
