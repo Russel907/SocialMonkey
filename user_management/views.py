@@ -7,7 +7,8 @@ from rest_framework import status
 from django.shortcuts import get_object_or_404
 from rest_framework.authtoken.models import Token
 from decimal import Decimal
-from restaurant.models import Table, Restaurant
+
+from restaurant.models import Table, Restaurant, Payment
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
 from django.db.models import Max, Sum
@@ -18,7 +19,240 @@ from .serializers import CustomerProfileSerializer, BookingSerializer, MenuBooki
 from restaurant.serializers import TableSerializer, RestaurantSerializer
 from .models import CustomerProfile, Booking, MenuBooking, Billing, SeatBooking, Review, SpecialRequestForSeat, SpecialRequestMessage, Notification, Address
 
+import re
+import os
+import requests as req
+from urllib.parse import urlencode
+from .models import OTP
+from .utils import send_otp_via_messagecentral, _get_auth_token
 
+import razorpay
+from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+import hmac
+import hashlib
+import json
+
+# ── Constants ──────────────────────────────────────────────────
+OTP_TTL_SECONDS = 300
+MAX_OTP_ATTEMPTS = 5
+RESEND_COOLDOWN_SECONDS = 30
+
+
+class SendOTPView(APIView):
+    def post(self, request):
+        phone = request.data.get('phone')
+
+        if not phone:
+            return Response(
+                {"error": "Phone number is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not re.match(r'^[6-9]\d{9}$', str(phone)):
+            return Response(
+                {"error": "Enter a valid 10-digit Indian mobile number."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Resend cooldown
+        last_otp = OTP.objects.filter(
+            phone=phone,
+            is_used=False,
+            is_expired=False
+        ).order_by('-created_at').first()
+
+        if last_otp:
+            seconds_passed = (timezone.now() - last_otp.created_at).total_seconds()
+            if seconds_passed < RESEND_COOLDOWN_SECONDS:
+                retry_after = int(RESEND_COOLDOWN_SECONDS - seconds_passed)
+                return Response(
+                    {
+                        "error": "Please wait before requesting another OTP.",
+                        "retry_after_seconds": retry_after
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+            # Expire old OTP
+            last_otp.is_expired = True
+            last_otp.save()
+
+        # Send OTP
+        sms_text = "Your Social Monkey verification code is <<< OTP >>>. Valid for 5 minutes. Do not share."
+        ok, provider_resp = send_otp_via_messagecentral(phone, sms_text)
+        if not ok:
+            return Response(
+                {"error": "Failed to send OTP. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Save OTP record
+        otp_obj = OTP.objects.create(phone=phone)
+        data = provider_resp.get("data") if isinstance(provider_resp, dict) else None
+        if data:
+            otp_obj.provider_verification_id = data.get("verificationId")
+            otp_obj.provider_transaction_id = data.get("transactionId")
+            otp_obj.save()
+
+        return Response(
+            {"message": "OTP sent successfully.", "expires_in": "5 minutes"},
+            status=status.HTTP_200_OK
+        )
+
+
+class VerifyOTPView(APIView):
+    def post(self, request):
+        phone = request.data.get('phone')
+        otp_code = request.data.get('otp')
+
+        if not phone or not otp_code:
+            return Response(
+                {"error": "Phone and OTP are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+        # Get latest valid OTP
+        try:
+            otp = OTP.objects.filter(
+                phone=phone,
+                is_used=False,
+                is_expired=False
+            ).latest('created_at')
+        except OTP.DoesNotExist:
+            return Response(
+                {"error": "No OTP found. Please request a new one."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check expiry
+        expiry_time = otp.created_at + timedelta(seconds=OTP_TTL_SECONDS)
+        if timezone.now() > expiry_time:
+            otp.is_expired = True
+            otp.save()
+            return Response(
+                {"error": "OTP has expired. Please request a new one."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check max attempts
+        if otp.attempts >= MAX_OTP_ATTEMPTS:
+            otp.is_expired = True
+            otp.save()
+            return Response(
+                {"error": "Too many attempts. Please request a new OTP."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        # Increment attempt BEFORE calling provider
+        otp.attempts += 1
+        otp.save()
+
+        # Verify with MessageCentral
+        verification_id = otp.provider_verification_id
+        if not verification_id:
+            return Response(
+                {"error": "Verification ID missing. Please request a new OTP."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        country = os.environ.get("MESSAGECENTRAL_COUNTRY_CODE", "91")
+        customer_id = os.environ.get("MESSAGECENTRAL_CUSTOMER_ID")
+        base = os.environ.get("MESSAGECENTRAL_BASE", "https://cpaas.messagecentral.com")
+
+        params = {
+            "countryCode": country,
+            "mobileNumber": phone,
+            "verificationId": verification_id,
+            "customerId": customer_id,
+            "code": otp_code
+        }
+        validate_url = f"{base}/verification/v3/validateOtp?{urlencode(params)}"
+
+        ok, token_or_err = _get_auth_token(country=country)
+        if not ok:
+            return Response(
+                {"error": "Auth error. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        headers = {"authToken": token_or_err, "Accept": "application/json"}
+
+        try:
+            resp = req.get(validate_url, headers=headers, timeout=10)
+        except Exception:
+            return Response(
+                {"error": "Network error. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        try:
+            j = resp.json()
+        except ValueError:
+            j = {}
+
+        # OTP wrong
+        if not (resp.status_code == 200 and j.get("message") == "SUCCESS"):
+           
+            attempts_left = MAX_OTP_ATTEMPTS - otp.attempts
+            return Response(
+                {
+                    "error": "Invalid OTP. Please try again.",
+                    "attempts_remaining": max(attempts_left, 0)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # OTP correct
+        otp.is_used = True
+        otp.save()
+
+        # Existing user
+        existing_user = User.objects.filter(username=phone).first()
+        if existing_user:
+            token, _ = Token.objects.get_or_create(user=existing_user)
+            try:
+                profile = existing_user.customer_profile
+                return Response(
+                    {
+                        "message": "Login successful.",
+                        "is_new_user": False,
+                        "token": token.key,
+                        "profile": {
+                            "id": profile.id,
+                            "full_name": profile.full_name,
+                            "phone": existing_user.username,
+                            "gender": profile.gender,
+                            "is_verified": profile.is_verified,
+                        }
+                    },
+                    status=status.HTTP_200_OK
+                )
+            except CustomerProfile.DoesNotExist:
+                pass
+
+        # New user — create User + CustomerProfile
+        new_user = User.objects.create(username=phone)
+        profile = CustomerProfile.objects.create(
+            user=new_user,
+            full_name="",
+            is_verified=True
+        )
+        token, _ = Token.objects.get_or_create(user=new_user)
+        return Response(
+            {
+                "message": "OTP verified. Please complete your profile.",
+                "is_new_user": True,
+                "token": token.key,
+                "profile": {
+                    "id": profile.id,
+                    "phone": phone,
+                    "is_verified": True,
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
 
 class CustomerProfileView(APIView):
     def post(self, request):
@@ -529,8 +763,10 @@ class CompleteOrderView(APIView):
 
             billing.complete_order = True
             billing.save()
-            table.booking_status = False
-            table.save()
+            if billing.table:
+                table = billing.table
+                table.booking_status = False
+                table.save()
 
             return Response({
                 "message": "Order marked as completed successfully.",
@@ -697,3 +933,164 @@ class CancelSeatBookingView(APIView):
                 "message": "Cancellation late. No refund as per policy.",
                 "refund_eligible": False,
             }, status=status.HTTP_400_BAD_REQUEST)
+
+# ── Razorpay ───────────────────────────────────────────────────
+
+class CreateRazorpayOrderView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        booking_id = request.data.get('booking_id')
+
+        if not booking_id:
+            return Response(
+                {"error": "booking_id is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get the booking
+        try:
+            booking = SeatBooking.objects.get(
+                id=booking_id,
+                user=request.user.customer_profile
+            )
+        except SeatBooking.DoesNotExist:
+            return Response(
+                {"error": "Booking not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Must be pending
+        if booking.payment_status != 'pending':
+            return Response(
+                {"error": f"Booking is already {booking.payment_status}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check lock not expired
+        if booking.is_lock_expired():
+            booking.release_lock()
+            return Response(
+                {"error": "Booking lock expired. Please book again."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create Razorpay order
+        client = razorpay.Client(
+            auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+        )
+
+        # Amount must be in paise (multiply by 100)
+        amount_in_paise = int(booking.total_advance_payment * 100)
+
+        try:
+            razorpay_order = client.order.create({
+                "amount": amount_in_paise,
+                "currency": "INR",
+                "receipt": f"booking_{booking.id}",
+                "notes": {
+                    "booking_id": str(booking.id),
+                    "restaurant": booking.restaurant.name,
+                    "guests": str(booking.number_of_guests),
+                }
+            })
+        except Exception as e:
+            return Response(
+                {"error": "Failed to create payment order.", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {
+                "razorpay_order_id": razorpay_order['id'],
+                "amount": amount_in_paise,
+                "currency": "INR",
+                "booking_id": booking.id,
+                "razorpay_key": settings.RAZORPAY_KEY_ID,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class RazorpayWebhookView(APIView):
+
+    def post(self, request):
+        webhook_secret = settings.RAZORPAY_KEY_SECRET
+
+        # Get Razorpay signature from headers
+        razorpay_signature = request.headers.get('X-Razorpay-Signature')
+        if not razorpay_signature:
+            return Response(
+                {"error": "Missing signature."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Verify webhook signature
+        body = request.body
+        expected_signature = hmac.HMAC(
+            webhook_secret.encode('utf-8'),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected_signature, razorpay_signature):
+            return Response(
+                {"error": "Invalid signature."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Parse event
+        try:
+            payload = json.loads(body)
+        except Exception:
+            return Response(
+                {"error": "Invalid JSON."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        event = payload.get('event')
+
+        # Payment success
+        if event == 'payment.captured':
+            payment_entity = payload['payload']['payment']['entity']
+            notes = payment_entity.get('notes', {})
+            booking_id = notes.get('booking_id')
+
+            if not booking_id:
+                return Response({"error": "booking_id missing in notes."}, status=400)
+
+            try:
+                booking = SeatBooking.objects.get(id=booking_id)
+            except SeatBooking.DoesNotExist:
+                return Response({"error": "Booking not found."}, status=404)
+
+            if booking.is_lock_expired():
+                booking.release_lock()
+                return Response({"error": "Booking expired."}, status=400)
+
+            booking.payment_status = 'success'
+            booking.locked = False
+            booking.lock_expiry = None
+            booking.save()
+
+            return Response({"status": "Booking confirmed."}, status=200)
+
+        # Payment failed
+        if event == 'payment.failed':
+            payment_entity = payload['payload']['payment']['entity']
+            notes = payment_entity.get('notes', {})
+            booking_id = notes.get('booking_id')
+
+            if booking_id:
+                try:
+                    booking = SeatBooking.objects.get(id=booking_id)
+                    booking.release_lock()
+                except SeatBooking.DoesNotExist:
+                    pass
+
+            return Response({"status": "Payment failed, booking released."}, status=200)
+
+        # Other events — just acknowledge
+        return Response({"status": "Event received."}, status=200)

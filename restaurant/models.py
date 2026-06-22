@@ -1,7 +1,7 @@
 from django.db import models
 from datetime import date, datetime
 from django.contrib.auth.models import User
-
+from django.core.exceptions import ValidationError
 
 
 class Restaurant(models.Model):
@@ -10,6 +10,8 @@ class Restaurant(models.Model):
     image = models.ImageField(upload_to='media/restaurants/')
     location = models.CharField(max_length=500)
     map_link = models.URLField(max_length=1000)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     phone_number = models.CharField(max_length=15)
     owner_name = models.CharField(max_length=255)
     food_type = models.CharField(max_length=255, blank=True, null=True) 

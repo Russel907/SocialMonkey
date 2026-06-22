@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path
-from .views import CustomerProfileView, EditProfile, MenuBookingView, BillingView, RestaurantListView, SeatBookingView, ReviewView, ConfirmPaymentView, SpecialRequestForSeatView, SpecialRequestMessageView, NotificationView, AddressView, CompleteOrderView, CancelSeatBookingView
+from .views import CustomerProfileView, EditProfile, MenuBookingView, BillingView, RestaurantListView, SeatBookingView, ReviewView, ConfirmPaymentView, SpecialRequestForSeatView, SpecialRequestMessageView, NotificationView, AddressView, CompleteOrderView, CancelSeatBookingView, SendOTPView, VerifyOTPView, CreateRazorpayOrderView, RazorpayWebhookView
 
 urlpatterns = [
     path('login/', CustomerProfileView.as_view(), name="login"),
@@ -23,4 +23,8 @@ urlpatterns = [
     path('address/<int:pk>/', AddressView.as_view(), name='address-detail'),
     path('complete_order/', CompleteOrderView.as_view(), name='complete-order'),
     path('cancel/', CancelSeatBookingView.as_view(), name='cancel-seat-booking'),
+    path('send-otp/', SendOTPView.as_view(), name='send-otp'),
+    path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
+    path('payment/create-order/', CreateRazorpayOrderView.as_view(), name='create-razorpay-order'),
+    path('payment/webhook/', RazorpayWebhookView.as_view(), name='razorpay-webhook'),
 ]

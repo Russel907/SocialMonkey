@@ -4,8 +4,6 @@ from restaurant.models import Restaurant, Table, Menu, Payment, Timing, SeatSlot
 from decimal import Decimal
 from django.utils import timezone
 
-
-
 class CustomerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_profile')
     full_name = models.CharField(max_length=255)
@@ -224,4 +222,28 @@ class Address(models.Model):
     def __str__(self):
         return f"{self.user} - {self.get_address_type_display()} Address"
 
+# class OTPAttemptTracker(models.Model):
+#     phone = models.CharField(max_length=15, unique=True)
+#     failed_attempts = models.PositiveIntegerField(default=0)
+#     locked_until = models.DateTimeField(null=True, blank=True)
+#     updated_at = models.DateTimeField(auto_now=True)
 
+#     def is_locked(self):
+#         if self.locked_until and timezone.now() < self.locked_until:
+#             return True
+#         return False
+
+#     def __str__(self):
+#         return f"Tracker for {self.phone}"
+
+class OTP(models.Model):
+    phone = models.CharField(max_length=15)
+    provider_verification_id = models.CharField(max_length=255, null=True, blank=True)
+    provider_transaction_id = models.CharField(max_length=255, null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+    is_expired = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"OTP for {self.phone}"

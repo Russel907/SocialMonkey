@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path
-from .views import RestaurantRegisterView, RestaurantLoginView, MenuCreateListView, TableCreateView, PaymentCreateView, TimingView, SeatsCreateView, SeatSlotView, GalleryView, PerformanceView, OfferView, DiningOfferView, TableConfigView, CreateServerView, ServerDetailView, TableOrderListView, SeatOrderListView, SeatBookingDetailView
+from .views import RestaurantRegisterView, RestaurantLoginView, MenuCreateListView, TableCreateView, PaymentCreateView, TimingView, SeatsCreateView, SeatSlotView, GalleryView, PerformanceView, OfferView, DiningOfferView, TableConfigView, CreateServerView, ServerDetailView, TableOrderListView, SeatOrderListView, SeatBookingDetailView, NearbyRestaurantsView
 
 urlpatterns = [
     path('signup/', RestaurantRegisterView.as_view(), name="restaurants"),
@@ -33,6 +33,6 @@ urlpatterns = [
     path('table-orders/', TableOrderListView.as_view(), name='table-order-list'),
     path('seat-booking-list/', SeatOrderListView.as_view(), name='seat-booking-list'),
     path('seat-booking-list/<int:pk>/', SeatBookingDetailView.as_view(), name='seat-booking-list'),
-
+    path('nearby/', NearbyRestaurantsView.as_view(), name='nearby-restaurants'),
     
 ]

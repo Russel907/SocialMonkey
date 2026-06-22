@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from .models import Restaurant, Menu, Table, TableConfig, Payment, Timing, Seats, SeatSlot, Gallery, Performance, Offer, DiningOffer, TableConfig, RestaurantStaffProfile, Server
 from .serializers import RestaurantSerializer, MenuSerializer, TableSerializer, PaymentSerializer, TimingSerializer, SeatSerializer, SeatSlotSerializer, GallerySerializer, Performanceserializer, OfferSerializer, DiningOfferSerializer, TableConfigSerializer, serverSerializer
 from user_management.models import MenuBooking, SpecialRequestMessage, SeatBooking, SpecialRequestForSeat
+from math import radians, sin, cos, sqrt, atan2
 
 class RestaurantRegisterView(APIView):
     def post(self, request):
@@ -936,8 +937,8 @@ class SeatBookingDetailView(APIView):
         booking = get_object_or_404(SeatBooking.objects.select_related('user__user', 'seat_slot', 'restaurant'), pk=pk)
 
         if booking.restaurant.user != request.user:
-            return Response({"error": "You are not authorized to view this booking."}, status=HTTP_404_NOT_FOUND)
-
+            # return Response({"error": "You are not authorized to view this booking."}, status=HTTP_404_NOT_FOUND)
+            return Response({"error": "You are not authorized to view this booking."}, status=status.HTTP_403_FORBIDDEN)
         special_request_seat = SpecialRequestForSeat.objects.filter(booking=booking).first()
 
         data = {
@@ -953,3 +954,58 @@ class SeatBookingDetailView(APIView):
         }
 
         return Response(data, status=200)
+
+class NearbyRestaurantsView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user_lat = request.query_params.get('latitude')
+        user_lng = request.query_params.get('longitude')
+
+        if not user_lat or not user_lng:
+            return Response(
+                {"error": "latitude and longitude are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            user_lat = float(user_lat)
+            user_lng = float(user_lng)
+        except ValueError:
+            return Response(
+                {"error": "Invalid coordinates."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        restaurants = Restaurant.objects.filter(
+            latitude__isnull=False,
+            longitude__isnull=False
+        )
+
+        def haversine(lat1, lon1, lat2, lon2):
+            R = 6371  # Earth radius in km
+            lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+            return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+        results = []
+        for r in restaurants:
+            distance = haversine(user_lat, user_lng, float(r.latitude), float(r.longitude))
+            results.append({
+                "id": r.id,
+                "name": r.name,
+                "location": r.location,
+                "image": r.image.url if r.image else None,
+                "food_type": r.food_type,
+                "average_bill_for_two": r.average_bill_for_two,
+                "distance_km": round(distance, 1),
+                "map_link": r.map_link,
+                "latitude": float(r.latitude),
+                "longitude": float(r.longitude),
+            })
+
+        results.sort(key=lambda x: x['distance_km'])
+        return Response(results, status=status.HTTP_200_OK)
