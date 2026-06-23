@@ -12,7 +12,7 @@ class RestaurantSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Restaurant
-        fields = ['id', 'name', 'image', 'location', 'map_link', 'phone_number', 'owner_name', 'email', 'password', 'food_type','average_bill_for_two']
+        fields = ['id', 'name', 'image', 'location', 'map_link', 'phone_number', 'owner_name', 'email', 'password', 'food_type','average_bill_for_two', 'latitude', 'longitude']
 
     def validate_email(self, value):
         if User.objects.filter(username=value).exists():
