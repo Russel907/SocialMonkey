@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Razorpay Seat Payment Test</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body>
+  <h2>Razorpay Seat Booking Test</h2>
+
+  <button id="payBtn">Pay Now</button>
+
+  <pre id="output"></pre>
+
+  <script>
+    // ======= PUT YOUR VALUES HERE =======
+    const razorpayKey = "rzp_test_T4YmPqgqoLZlUp";      // from create-order response
+    const razorpayOrderId = "order_T5QR9m6klE2HhE";      // from create-order response
+    const bookingId = 95;                                // your booking id
+    const token = "21c55f24ddfbec84d8c8d87d9661ff7b4620e035";        // Token xxxxx only value, no "Token " here
+    const amount = 800;                                 // in paise, example 100 = ₹1
+    // ====================================
+
+    document.getElementById("payBtn").onclick = function () {
+      const options = {
+        key: razorpayKey,
+        amount: amount,
+        currency: "INR",
+        name: "Social Monkey",
+        description: "Seat Booking Test Payment",
+        order_id: razorpayOrderId,
+
+        handler: async function (response) {
+          document.getElementById("output").textContent =
+            "Payment success!\n\n" +
+            JSON.stringify(response, null, 2);
+
+          // response contains:
+          // response.razorpay_payment_id
+          // response.razorpay_order_id
+          // response.razorpay_signature
+
+          // Automatically call your backend confirm-payment API
+          try {
+            const confirmRes = await fetch("https://api.social-monkey.com/user_management/confirm-payment/", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Token " + token
+              },
+              body: JSON.stringify({
+                booking_id: bookingId,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature
+              })
+            });
+
+            const confirmData = await confirmRes.json();
+
+            document.getElementById("output").textContent +=
+              "\n\nConfirm Payment API Response:\n" +
+              JSON.stringify(confirmData, null, 2);
+
+          } catch (err) {
+            document.getElementById("output").textContent +=
+              "\n\nError calling confirm-payment:\n" + err;
+          }
+        },
+
+        prefill: {
+          name: "Test User",
+          contact: "9880776136"
+        },
+
+        theme: {
+          color: "#3399cc"
+        }
+      };
+
+      const rzp = new Razorpay(options);
+
+      rzp.on("payment.failed", function (response) {
+        document.getElementById("output").textContent =
+          "Payment failed!\n\n" +
+          JSON.stringify(response, null, 2);
+      });
+
+      rzp.open();
+    };
+  </script>
+</body>
+</html>

@@ -455,7 +455,7 @@ class ConfirmPaymentView(APIView):
             ).aggregate(Sum('number_of_guests'))['number_of_guests__sum'] or 0
 
             total_taken = confirmed + locked
-            available = booking.seat_slot.total_seats - total_taken
+            available = booking.seat_slot.available_seats - total_taken
 
             return Response({
                 "booking_id": booking.id,
