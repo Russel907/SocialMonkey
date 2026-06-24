@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Razorpay Bill Payment Test</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body>
+  <h2>Bill Payment Test</h2>
+  <button id="payBtn">Pay Bill</button>
+  <pre id="result"></pre>
+
+  <script>
+    const razorpayKey = "rzp_test_T4YmPqgqoLZlUp";
+    const razorpayOrderId = "PUT_BILL_ORDER_ID_HERE";
+    const amount = 400; // optional only for display
+
+    document.getElementById("payBtn").onclick = function () {
+      const options = {
+        key: razorpayKey,
+        amount: amount,
+        currency: "INR",
+        name: "Social Monkey",
+        description: "Final Bill Payment",
+        order_id: razorpayOrderId,
+        handler: function (response) {
+          document.getElementById("result").textContent =
+            JSON.stringify(response, null, 2);
+        },
+        theme: {
+          color: "#3399cc"
+        }
+      };
+
+      const rzp = new Razorpay(options);
+      rzp.open();
+    };
+  </script>
+</body>
+</html>

@@ -1230,3 +1230,48 @@ class CreateBillPaymentOrderView(APIView):
             },
             status=status.HTTP_200_OK
         )
+
+class ConfirmBillPaymentView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        razorpay_order_id = request.data.get('razorpay_order_id')
+        razorpay_payment_id = request.data.get('razorpay_payment_id')
+        razorpay_signature = request.data.get('razorpay_signature')
+        billing_id = request.data.get('billing_id')
+
+        if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature, billing_id]):
+            return Response(
+                {"error": "razorpay_order_id, razorpay_payment_id, razorpay_signature and billing_id are all required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Verify Razorpay signature
+        generated_signature = hmac.HMAC(
+            settings.RAZORPAY_KEY_SECRET.encode('utf-8'),
+            f"{razorpay_order_id}|{razorpay_payment_id}".encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(generated_signature, razorpay_signature):
+            return Response(
+                {"error": "Payment verification failed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            billing = Billing.objects.get(id=billing_id)
+        except Billing.DoesNotExist:
+            return Response(
+                {"error": "Billing not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if billing.payment_status == 'success':
+            return Response({"status": "Bill already paid."})
+
+        billing.payment_status = 'success'
+        billing.save()
+
+        return Response({"status": "Bill payment confirmed!"}, status=status.HTTP_200_OK)
