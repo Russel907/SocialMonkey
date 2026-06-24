@@ -3,9 +3,6 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import Restaurant, Menu, Table, Payment, Timing, Seats, SeatSlot, Gallery, Performance, Offer, DiningOffer, TableConfig, RestaurantStaffProfile, Server
 
-
-
-
 class RestaurantSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(write_only=True)
     password = serializers.CharField(write_only=True)
@@ -63,7 +60,34 @@ class RestaurantSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+class RestaurantForgotPasswordSerializer(serializers.Serializer):
+    phone_number = serializers.CharField()
 
+    def validate_phone_number(self, value):
+        if not Restaurant.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError("No restaurant account found with this phone number.")
+        return value
+
+
+class RestaurantResetPasswordSerializer(serializers.Serializer):
+    phone_number = serializers.CharField()
+    code = serializers.CharField()
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate_new_password(self, value):
+        if len(value) < 8 or \
+           not re.search(r'[A-Z]', value) or \
+           not re.search(r'[a-z]', value) or \
+           not re.search(r'[!@#$%^&*(),.?":{}|<>]', value):
+            raise serializers.ValidationError("Password must be at least 8 characters with upper, lower, special char.")
+        return value
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError("Passwords do not match.")
+        return data
+        
 class serverSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
     re_enter_password = serializers.CharField(write_only=True)

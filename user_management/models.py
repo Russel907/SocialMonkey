@@ -68,7 +68,7 @@ class SeatBooking(models.Model):
     lock_expiry = models.DateTimeField(null=True, blank=True)
 
     queue_priority = models.PositiveIntegerField(null=True, blank=True)  
-
+    razorpay_payment_id = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -117,10 +117,17 @@ class MenuBooking(models.Model):
 
 
 class Billing(models.Model):
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ]
     booking = models.OneToOneField(SeatBooking, on_delete=models.CASCADE, related_name='billing', null=True, blank=True)
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='menu_billings')
     total_menu_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     final_amount_to_pay = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, default='pending')
+    razorpay_order_id = models.CharField(max_length=255, null=True, blank=True)
     complete_order = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -144,7 +151,7 @@ class Billing(models.Model):
 
     def release_table_if_completed(self):
         if self.complete_order:
-            table=self.table
+            table = self.table
             table.booking_status = False
             table.save()
 
@@ -155,7 +162,6 @@ class Billing(models.Model):
 
     def __str__(self):
         return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"
-
 
 class Review(models.Model):
     user = models.ForeignKey(CustomerProfile, on_delete=models.CASCADE, related_name='reviews')

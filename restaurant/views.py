@@ -11,9 +11,19 @@ from django.utils.timezone import localtime
 from datetime import datetime, timedelta
 from django.shortcuts import get_object_or_404
 from .models import Restaurant, Menu, Table, TableConfig, Payment, Timing, Seats, SeatSlot, Gallery, Performance, Offer, DiningOffer, TableConfig, RestaurantStaffProfile, Server
-from .serializers import RestaurantSerializer, MenuSerializer, TableSerializer, PaymentSerializer, TimingSerializer, SeatSerializer, SeatSlotSerializer, GallerySerializer, Performanceserializer, OfferSerializer, DiningOfferSerializer, TableConfigSerializer, serverSerializer
+from .serializers import RestaurantSerializer, MenuSerializer, TableSerializer, PaymentSerializer, TimingSerializer, SeatSerializer, SeatSlotSerializer, GallerySerializer, Performanceserializer, OfferSerializer, DiningOfferSerializer, TableConfigSerializer, serverSerializer, RestaurantForgotPasswordSerializer, RestaurantResetPasswordSerializer
 from user_management.models import MenuBooking, SpecialRequestMessage, SeatBooking, SpecialRequestForSeat
 from math import radians, sin, cos, sqrt, atan2
+
+from user_management.models import OTP
+from user_management.utils import send_otp_via_messagecentral, _get_auth_token
+from urllib.parse import urlencode
+import os, requests as req
+
+
+OTP_TTL_SECONDS = 300
+MAX_OTP_ATTEMPTS = 5
+RESEND_COOLDOWN_SECONDS = 30
 
 class RestaurantRegisterView(APIView):
     def post(self, request):
@@ -91,6 +101,130 @@ class RestaurantLoginView(APIView):
 
         return Response({'error': 'User is not assigned to any restaurant or staff profile.'}, status=status.HTTP_403_FORBIDDEN)
 
+
+class RestaurantForgotPasswordView(APIView):
+    def post(self, request):
+        serializer = RestaurantForgotPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        phone = serializer.validated_data['phone_number']
+
+        last_otp = OTP.objects.filter(phone=phone, is_used=False, is_expired=False).order_by('-created_at').first()
+        if last_otp:
+            seconds_passed = (timezone.now() - last_otp.created_at).total_seconds()
+            if seconds_passed < RESEND_COOLDOWN_SECONDS:
+                return Response(
+                    {"error": "Please wait before requesting another code.",
+                     "retry_after_seconds": int(RESEND_COOLDOWN_SECONDS - seconds_passed)},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+            last_otp.is_expired = True
+            last_otp.save()
+
+        sms_text = "Your Social Monkey password reset code is <<< OTP >>>. Valid for 5 minutes. Do not share."
+        ok, provider_resp = send_otp_via_messagecentral(phone, sms_text)
+        if not ok:
+            return Response({"error": "Failed to send code. Please try again later."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        otp_obj = OTP.objects.create(phone=phone)
+        data = provider_resp.get("data") if isinstance(provider_resp, dict) else None
+        if data:
+            otp_obj.provider_verification_id = data.get("verificationId")
+            otp_obj.provider_transaction_id = data.get("transactionId")
+            otp_obj.save()
+
+        return Response({"message": "Reset code sent successfully.", "expires_in": "5 minutes"}, status=status.HTTP_200_OK)
+
+
+class RestaurantVerifyResetCodeView(APIView):
+    def post(self, request):
+        phone = request.data.get('phone_number')
+        code = request.data.get('code')
+
+        if not phone or not code:
+            return Response({"error": "phone_number and code are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            otp = OTP.objects.filter(phone=phone, is_used=False, is_expired=False).latest('created_at')
+        except OTP.DoesNotExist:
+            return Response({"error": "No code found. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+
+        expiry_time = otp.created_at + timedelta(seconds=OTP_TTL_SECONDS)
+        if timezone.now() > expiry_time:
+            otp.is_expired = True
+            otp.save()
+            return Response({"error": "Code has expired. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if otp.attempts >= MAX_OTP_ATTEMPTS:
+            otp.is_expired = True
+            otp.save()
+            return Response({"error": "Too many attempts. Please request a new code."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        otp.attempts += 1
+        otp.save()
+
+        country = os.environ.get("MESSAGECENTRAL_COUNTRY_CODE", "91")
+        customer_id = os.environ.get("MESSAGECENTRAL_CUSTOMER_ID")
+        base = os.environ.get("MESSAGECENTRAL_BASE", "https://cpaas.messagecentral.com")
+
+        params = {
+            "countryCode": country, "mobileNumber": phone,
+            "verificationId": otp.provider_verification_id,
+            "customerId": customer_id, "code": code
+        }
+        validate_url = f"{base}/verification/v3/validateOtp?{urlencode(params)}"
+
+        ok, token_or_err = _get_auth_token(country=country)
+        if not ok:
+            return Response({"error": "Auth error. Please try again later."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        try:
+            resp = req.get(validate_url, headers={"authToken": token_or_err, "Accept": "application/json"}, timeout=10)
+            j = resp.json()
+        except Exception:
+            j = {}
+
+        if not (resp.status_code == 200 and j.get("message") == "SUCCESS"):
+            return Response({"error": "Invalid code. Please try again.",
+                              "attempts_remaining": max(MAX_OTP_ATTEMPTS - otp.attempts, 0)},
+                             status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark verified but NOT used yet — reset-password step consumes it
+        return Response({"message": "Code verified. You can now reset your password."}, status=status.HTTP_200_OK)
+
+
+class RestaurantResetPasswordView(APIView):
+    def post(self, request):
+        serializer = RestaurantResetPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        phone = serializer.validated_data['phone_number']
+        code = serializer.validated_data['code']
+        new_password = serializer.validated_data['new_password']
+
+        try:
+            otp = OTP.objects.filter(phone=phone, is_used=False, is_expired=False).latest('created_at')
+        except OTP.DoesNotExist:
+            return Response({"error": "No verified code found. Please restart the reset process."}, status=status.HTTP_400_BAD_REQUEST)
+
+        expiry_time = otp.created_at + timedelta(seconds=OTP_TTL_SECONDS)
+        if timezone.now() > expiry_time:
+            return Response({"error": "Code expired. Please restart the reset process."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            restaurant = Restaurant.objects.get(phone_number=phone)
+        except Restaurant.DoesNotExist:
+            return Response({"error": "No restaurant account found."}, status=status.HTTP_404_NOT_FOUND)
+
+        restaurant.user.set_password(new_password)
+        restaurant.user.save()
+
+        otp.is_used = True
+        otp.save()
+
+        return Response({"message": "Password reset successfully. Please log in."}, status=status.HTTP_200_OK)
 
 class CreateServerView(APIView):
     authentication_classes = [TokenAuthentication]
@@ -973,39 +1107,40 @@ class NearbyRestaurantsView(APIView):
             user_lat = float(user_lat)
             user_lng = float(user_lng)
         except ValueError:
-            return Response(
-                {"error": "Invalid coordinates."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        restaurants = Restaurant.objects.filter(
-            latitude__isnull=False,
-            longitude__isnull=False
-        )
+            return Response({"error": "Invalid coordinates."}, status=status.HTTP_400_BAD_REQUEST)
 
         def haversine(lat1, lon1, lat2, lon2):
-            R = 6371  # Earth radius in km
+            R = 6371
             lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
             dlat = lat2 - lat1
             dlon = lon2 - lon1
             a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
             return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
-        results = []
-        for r in restaurants:
-            distance = haversine(user_lat, user_lng, float(r.latitude), float(r.longitude))
-            results.append({
+        located = []
+        unlocated = []
+
+        for r in Restaurant.objects.all():
+            entry = {
                 "id": r.id,
                 "name": r.name,
                 "location": r.location,
                 "image": r.image.url if r.image else None,
                 "food_type": r.food_type,
                 "average_bill_for_two": r.average_bill_for_two,
-                "distance_km": round(distance, 1),
                 "map_link": r.map_link,
-                "latitude": float(r.latitude),
-                "longitude": float(r.longitude),
-            })
+            }
+            if r.latitude is not None and r.longitude is not None:
+                distance = haversine(user_lat, user_lng, float(r.latitude), float(r.longitude))
+                entry.update({
+                    "distance_km": round(distance, 1),
+                    "latitude": float(r.latitude),
+                    "longitude": float(r.longitude),
+                })
+                located.append(entry)
+            else:
+                entry.update({"distance_km": None, "latitude": None, "longitude": None})
+                unlocated.append(entry)
 
-        results.sort(key=lambda x: x['distance_km'])
-        return Response(results, status=status.HTTP_200_OK)
+        located.sort(key=lambda x: x['distance_km'])
+        return Response(located + unlocated, status=status.HTTP_200_OK)

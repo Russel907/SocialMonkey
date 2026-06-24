@@ -35,14 +35,24 @@ def create_or_update_seat_slots(sender, instance, created, **kwargs):
 @receiver(post_save, sender=TableConfig)
 def generate_or_trim_tables(sender, instance, created, **kwargs):
     restaurant = instance.restaurant
-    existing_tables = restaurant.tables.all().order_by('id')  
+    existing_tables = restaurant.tables.all().order_by('id')
     existing_count = existing_tables.count()
     target_count = instance.total_tables
 
     if target_count > existing_count:
         for i in range(existing_count + 1, target_count + 1):
             table_number = f"TBL-{i:03d}"
-            qr_data = f"https://kaiztren.pythonanywhere.com/restaurant/menu/"
+
+            table = Table.objects.create(
+                restaurant=restaurant,
+                table_number=table_number,
+            )
+
+            # QR now encodes restaurant + table so the menu page knows where the order came from
+            qr_data = (
+                f"https://kaiztren.pythonanywhere.com/restaurant/menu/"
+                f"?restaurant_id={restaurant.id}&table_id={table.id}"
+            )
 
             qr = qrcode.make(qr_data)
             buffer = BytesIO()
@@ -52,11 +62,8 @@ def generate_or_trim_tables(sender, instance, created, **kwargs):
             filename = f"{restaurant.name}_table_{table_number}.png"
             filebuffer = ContentFile(buffer.getvalue(), name=filename)
 
-            Table.objects.create(
-                restaurant=restaurant,
-                table_number=table_number,
-                qr_code=filebuffer
-            )
+            table.qr_code = filebuffer
+            table.save()
 
     elif target_count < existing_count:
         tables_to_delete = existing_tables.reverse()[:existing_count - target_count]

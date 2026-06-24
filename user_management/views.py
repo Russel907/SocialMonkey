@@ -311,8 +311,16 @@ class EditProfile(APIView):
                 "profile": CustomerProfileSerializer(updated_profile).data
             }, status=status.HTTP_200_OK)
 
+    def delete(self, request, pk=None):
+        if not pk:
+            return Response({"error": "Customer profile ID (pk) is required."}, status=status.HTTP_400_BAD_REQUEST)
+        profile = get_object_or_404(CustomerProfile, pk=pk, user=request.user)
+        profile.profile_picture.delete(save=False)
+        profile.profile_picture = None
+        profile.save()
+        return Response({"message": "Profile picture removed."}, status=status.HTTP_200_OK)
+        
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 
 class RestaurantListView(APIView):
     authentication_classes = [TokenAuthentication]
@@ -476,13 +484,27 @@ class ConfirmPaymentView(APIView):
             ]
 
             return Response({"bookings": data})
-
     def post(self, request):
-        booking_id = request.data.get("booking_id")
-        payment_status = request.data.get("payment_status")  # 'success' or 'failed'
+        razorpay_order_id = request.data.get('razorpay_order_id')
+        razorpay_payment_id = request.data.get('razorpay_payment_id')
+        razorpay_signature = request.data.get('razorpay_signature')
+        booking_id = request.data.get('booking_id')
 
-        if not booking_id or payment_status not in ['success', 'failed']:
-            return Response({"error": "Invalid data provided."}, status=status.HTTP_400_BAD_REQUEST)
+        if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature, booking_id]):
+            return Response(
+                {"error": "razorpay_order_id, razorpay_payment_id, razorpay_signature and booking_id are all required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Verify Razorpay actually signed this payment — replaces the old trust-based flag
+        generated_signature = hmac.new(
+            settings.RAZORPAY_KEY_SECRET.encode('utf-8'),
+            f"{razorpay_order_id}|{razorpay_payment_id}".encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(generated_signature, razorpay_signature):
+            return Response({"error": "Payment verification failed."}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             try:
@@ -490,30 +512,23 @@ class ConfirmPaymentView(APIView):
             except SeatBooking.DoesNotExist:
                 return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            now = timezone.now()
+            if booking.payment_status == 'success':
+                return Response({"status": "Booking confirmed!"})  # idempotent
 
+            now = timezone.now()
             if booking.is_lock_expired():
                 booking.release_lock()
                 return Response({"error": "Booking expired."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if payment_status == 'failed':
-                booking.release_lock()
-                return Response({"status": "Payment failed, booking released."}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Confirm fresh availability
             confirmed = SeatBooking.objects.filter(
-                seat_slot=booking.seat_slot,
-                payment_status='success'
+                seat_slot=booking.seat_slot, payment_status='success'
             ).aggregate(Sum('number_of_guests'))['number_of_guests__sum'] or 0
 
             locked = SeatBooking.objects.filter(
-                seat_slot=booking.seat_slot,
-                locked=True,
-                lock_expiry__gt=now
+                seat_slot=booking.seat_slot, locked=True, lock_expiry__gt=now
             ).exclude(id=booking.id).aggregate(Sum('number_of_guests'))['number_of_guests__sum'] or 0
 
-            total_taken = confirmed + locked
-            available = booking.seat_slot.available_seats - total_taken
+            available = booking.seat_slot.available_seats - (confirmed + locked)
 
             if available >= booking.number_of_guests:
                 booking.payment_status = 'success'
@@ -524,7 +539,6 @@ class ConfirmPaymentView(APIView):
             else:
                 booking.release_lock()
                 return Response({"error": "Seats not available anymore."}, status=status.HTTP_400_BAD_REQUEST)
-
 
 class SpecialRequestForSeatView(APIView):
     authentication_classes = [TokenAuthentication]
@@ -761,7 +775,10 @@ class CompleteOrderView(APIView):
             if not billing:
                 return Response({"error": "Billing not found for this booking or table."}, status=status.HTTP_404_NOT_FOUND)
 
+            if billing.payment_status != 'success':
+                return Response({"error": "Bill is not paid yet."}, status=400)
             billing.complete_order = True
+            billing.payment_status = 'paid'
             billing.save()
             if billing.table:
                 table = billing.table
@@ -1017,80 +1034,199 @@ class CreateRazorpayOrderView(APIView):
 class RazorpayWebhookView(APIView):
 
     def post(self, request):
-        webhook_secret = settings.RAZORPAY_KEY_SECRET
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET  # fixed: separate secret, not API key secret
 
-        # Get Razorpay signature from headers
         razorpay_signature = request.headers.get('X-Razorpay-Signature')
         if not razorpay_signature:
-            return Response(
-                {"error": "Missing signature."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Missing signature."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Verify webhook signature
         body = request.body
-        expected_signature = hmac.HMAC(
-            webhook_secret.encode('utf-8'),
-            body,
-            hashlib.sha256
+        expected_signature = hmac.new(
+            webhook_secret.encode('utf-8'), body, hashlib.sha256
         ).hexdigest()
 
         if not hmac.compare_digest(expected_signature, razorpay_signature):
-            return Response(
-                {"error": "Invalid signature."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Invalid signature."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Parse event
         try:
             payload = json.loads(body)
         except Exception:
-            return Response(
-                {"error": "Invalid JSON."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
 
         event = payload.get('event')
+        payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+        notes = payment_entity.get('notes', {})
+        payment_type = notes.get('type')  # 'bill_payment' if from CreateBillPaymentOrderView, else seat booking
 
-        # Payment success
         if event == 'payment.captured':
-            payment_entity = payload['payload']['payment']['entity']
-            notes = payment_entity.get('notes', {})
-            booking_id = notes.get('booking_id')
+            if payment_type == 'bill_payment':
+                return self._handle_bill_payment_captured(payment_entity, notes)
+            return self._handle_seat_booking_captured(payment_entity, notes)
 
-            if not booking_id:
-                return Response({"error": "booking_id missing in notes."}, status=400)
+        if event == 'payment.failed':
+            if payment_type == 'bill_payment':
+                return self._handle_bill_payment_failed(notes)
+            return self._handle_seat_booking_failed(notes)
 
+        return Response({"status": "Event received."}, status=200)
+
+    def _handle_seat_booking_captured(self, payment_entity, notes):
+        booking_id = notes.get('booking_id')
+        if not booking_id:
+            return Response({"error": "booking_id missing in notes."}, status=400)
+
+        with transaction.atomic():
             try:
-                booking = SeatBooking.objects.get(id=booking_id)
+                booking = SeatBooking.objects.select_for_update().get(id=booking_id)
             except SeatBooking.DoesNotExist:
                 return Response({"error": "Booking not found."}, status=404)
+
+            if booking.payment_status == 'success':
+                return Response({"status": "Already confirmed."}, status=200)  # idempotent on retries
 
             if booking.is_lock_expired():
                 booking.release_lock()
                 return Response({"error": "Booking expired."}, status=400)
+
+            expected_paise = int(round(booking.total_advance_payment * 100))
+            received_paise = int(payment_entity.get('amount', 0))
+            if received_paise != expected_paise:
+                return Response(
+                    {"error": "Amount mismatch.", "expected": expected_paise, "received": received_paise},
+                    status=400
+                )
 
             booking.payment_status = 'success'
             booking.locked = False
             booking.lock_expiry = None
             booking.save()
 
-            return Response({"status": "Booking confirmed."}, status=200)
+        return Response({"status": "Booking confirmed."}, status=200)
 
-        # Payment failed
-        if event == 'payment.failed':
-            payment_entity = payload['payload']['payment']['entity']
-            notes = payment_entity.get('notes', {})
-            booking_id = notes.get('booking_id')
+    def _handle_seat_booking_failed(self, notes):
+        booking_id = notes.get('booking_id')
+        if booking_id:
+            try:
+                booking = SeatBooking.objects.get(id=booking_id)
+                booking.release_lock()
+            except SeatBooking.DoesNotExist:
+                pass
+        return Response({"status": "Payment failed, booking released."}, status=200)
 
+    def _handle_bill_payment_captured(self, payment_entity, notes):
+        billing_id = notes.get('billing_id')
+        if not billing_id:
+            return Response({"error": "billing_id missing in notes."}, status=400)
+
+        with transaction.atomic():
+            try:
+                billing = Billing.objects.select_for_update().get(id=billing_id)
+            except Billing.DoesNotExist:
+                return Response({"error": "Billing not found."}, status=404)
+
+            if billing.payment_status == 'success':
+                return Response({"status": "Already paid."}, status=200)
+
+            expected_paise = int(round(billing.final_amount_to_pay * 100))
+            received_paise = int(payment_entity.get('amount', 0))
+            if received_paise != expected_paise:
+                return Response(
+                    {"error": "Amount mismatch.", "expected": expected_paise, "received": received_paise},
+                    status=400
+                )
+
+            billing.payment_status = 'success'
+            billing.save()
+
+        return Response({"status": "Bill payment confirmed."}, status=200)
+
+    def _handle_bill_payment_failed(self, notes):
+        billing_id = notes.get('billing_id')
+        if billing_id:
+            try:
+                billing = Billing.objects.get(id=billing_id)
+                billing.payment_status = 'failed'
+                billing.save()
+            except Billing.DoesNotExist:
+                pass
+        return Response({"status": "Bill payment failed."}, status=200)
+
+class CreateBillPaymentOrderView(APIView):
+    """
+    Creates a Razorpay order for the dining bill — amount is always looked up
+    server-side from the real Billing record, never trusted from the client.
+    """
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        table_id = request.data.get('table_id')
+        booking_id = request.data.get('booking_id')
+
+        if not table_id and not booking_id:
+            return Response(
+                {"error": "table_id or booking_id is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        billing = None
+        try:
             if booking_id:
-                try:
-                    booking = SeatBooking.objects.get(id=booking_id)
-                    booking.release_lock()
-                except SeatBooking.DoesNotExist:
-                    pass
+                # Ownership check: only the customer who made this booking can pay it
+                booking = SeatBooking.objects.get(id=booking_id, user=request.user.customer_profile)
+                billing = Billing.objects.filter(booking=booking).first()
+            if not billing and table_id:
+                # Table-only bills are shared dine-in bills — any diner at that table can pay,
+                # which is intentional (no single "owner" of a walk-in table order)
+                table = Table.objects.get(id=table_id)
+                billing = Billing.objects.filter(table=table).first()
+        except SeatBooking.DoesNotExist:
+            return Response({"error": "Booking not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
+        except Table.DoesNotExist:
+            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            return Response({"status": "Payment failed, booking released."}, status=200)
+        if not billing:
+            return Response({"error": "Bill not found. Generate the bill first."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Other events — just acknowledge
-        return Response({"status": "Event received."}, status=200)
+        if billing.payment_status == 'success':
+            return Response({"error": "This bill has already been paid."}, status=status.HTTP_400_BAD_REQUEST)
+
+        amount_rupees = billing.final_amount_to_pay  # Decimal — never client-supplied
+        if amount_rupees <= 0:
+            return Response({"error": "Nothing to pay for this bill."}, status=status.HTTP_400_BAD_REQUEST)
+
+        amount_in_paise = int(round(amount_rupees * 100))
+
+        notes = {
+            "type": "bill_payment",
+            "billing_id": str(billing.id),
+            "customer": str(request.user.username),
+        }
+
+        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+        try:
+            razorpay_order = client.order.create({
+                "amount": amount_in_paise,
+                "currency": "INR",
+                "receipt": f"bill_{billing.id}_{int(timezone.now().timestamp())}",
+                "notes": notes,
+            })
+        except Exception as e:
+            return Response(
+                {"error": "Failed to create bill payment order.", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        billing.razorpay_order_id = razorpay_order['id']
+        billing.save(update_fields=['razorpay_order_id'])
+
+        return Response(
+            {
+                "razorpay_order_id": razorpay_order['id'],
+                "amount": amount_in_paise,
+                "currency": "INR",
+                "billing_id": billing.id,
+                "razorpay_key": settings.RAZORPAY_KEY_ID,
+            },
+            status=status.HTTP_200_OK
+        )

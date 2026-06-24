@@ -1,11 +1,14 @@
 from django.contrib import admin
 from django.urls import path
-from .views import RestaurantRegisterView, RestaurantLoginView, MenuCreateListView, TableCreateView, PaymentCreateView, TimingView, SeatsCreateView, SeatSlotView, GalleryView, PerformanceView, OfferView, DiningOfferView, TableConfigView, CreateServerView, ServerDetailView, TableOrderListView, SeatOrderListView, SeatBookingDetailView, NearbyRestaurantsView
+from .views import RestaurantRegisterView, RestaurantLoginView, MenuCreateListView, TableCreateView, PaymentCreateView, TimingView, SeatsCreateView, SeatSlotView, GalleryView, PerformanceView, OfferView, DiningOfferView, TableConfigView, CreateServerView, ServerDetailView, TableOrderListView, SeatOrderListView, SeatBookingDetailView, NearbyRestaurantsView, RestaurantForgotPasswordView, RestaurantVerifyResetCodeView, RestaurantResetPasswordView
 
 urlpatterns = [
     path('signup/', RestaurantRegisterView.as_view(), name="restaurants"),
     path('restaurant/<int:pk>/', RestaurantRegisterView.as_view(), name='restaurant-update'),
     path('login/', RestaurantLoginView.as_view(), name='login'),
+    path('forgot-password/', RestaurantForgotPasswordView.as_view(), name='restaurant-forgot-password'),
+    path('verify-reset-code/', RestaurantVerifyResetCodeView.as_view(), name='restaurant-verify-reset-code'),
+    path('reset-password/', RestaurantResetPasswordView.as_view(), name='restaurant-reset-password'),
     path('menu/', MenuCreateListView.as_view(), name='menus'),
     path('menu/<int:pk>/', MenuCreateListView.as_view(), name='menu-edit'),
     path('table/', TableCreateView.as_view(), name='tables'),
