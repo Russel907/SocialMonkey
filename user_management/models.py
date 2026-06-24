@@ -123,7 +123,7 @@ class Billing(models.Model):
         ('failed', 'Failed'),
     ]
     booking = models.OneToOneField(SeatBooking, on_delete=models.CASCADE, related_name='billing', null=True, blank=True)
-    table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='menu_billings')
+    table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='menu_billings', null=True, blank=True)
     total_menu_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     final_amount_to_pay = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, default='pending')
@@ -160,8 +160,12 @@ class Billing(models.Model):
         super().save(*args, **kwargs)
         self.release_table_if_completed()
 
+    # def __str__(self):
+    #     return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"
     def __str__(self):
-        return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"
+        if self.table:
+            return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"
+        return f"Billing for booking #{self.booking.id} - Final: ₹{self.final_amount_to_pay}"
 
 class Review(models.Model):
     user = models.ForeignKey(CustomerProfile, on_delete=models.CASCADE, related_name='reviews')
