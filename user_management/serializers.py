@@ -57,7 +57,7 @@ class MenuBookingSerializer(serializers.ModelSerializer):
 class BillingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Billing
-        fields = ['id','booking','table','total_menu_price','final_amount_to_pay','created_at',]
+        fields = ['id', 'booking', 'table', 'total_menu_price', 'final_amount_to_pay', 'payment_status', 'complete_order', 'created_at']
         read_only_fields = ['total_menu_price','final_amount_to_pay','created_at',]
 
 
