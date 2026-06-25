@@ -160,6 +160,8 @@ class Billing(models.Model):
         super().save(*args, **kwargs)
         self.release_table_if_completed()
 
+    # def __str__(self):
+    #     return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"
     def __str__(self):
         if self.table:
             return f"Billing for table #{self.table.id} - Final: ₹{self.final_amount_to_pay}"

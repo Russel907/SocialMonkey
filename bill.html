@@ -11,13 +11,14 @@
 
   <script>
     const razorpayKey = "rzp_test_T4YmPqgqoLZlUp";
-    const razorpayOrderId = "PUT_BILL_ORDER_ID_HERE";
-    const amount = 400; // optional only for display
+    const razorpayOrderId = "order_T5S8PxrEJNpxsQ";
+    const billingId = 10;
+    const customerToken = "21c55f24ddfbec84d8c8d87d9661ff7b4620e035";
 
     document.getElementById("payBtn").onclick = function () {
       const options = {
         key: razorpayKey,
-        amount: amount,
+        amount: 70000,
         currency: "INR",
         name: "Social Monkey",
         description: "Final Bill Payment",
@@ -25,10 +26,27 @@
         handler: function (response) {
           document.getElementById("result").textContent =
             JSON.stringify(response, null, 2);
+          
+          // Auto confirm after payment
+          fetch("https://api.social-monkey.com/user_management/payment/confirm-bill/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Token " + customerToken
+            },
+            body: JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              billing_id: billingId
+            })
+          })
+          .then(r => r.json())
+          .then(data => {
+            document.getElementById("result").textContent += "\n\nConfirm Response:\n" + JSON.stringify(data, null, 2);
+          });
         },
-        theme: {
-          color: "#3399cc"
-        }
+        theme: { color: "#3399cc" }
       };
 
       const rzp = new Razorpay(options);
