@@ -258,6 +258,7 @@ class OTP(models.Model):
     def __str__(self):
         return f"OTP for {self.phone}"
 
+
 class PlatformSettings(models.Model):
     terms_and_conditions = models.TextField(blank=True, null=True)
     privacy_policy = models.TextField(blank=True, null=True)
@@ -270,3 +271,4 @@ class PlatformSettings(models.Model):
     def get_settings(cls):
         obj, created = cls.objects.get_or_create(pk=1)
         return obj
+

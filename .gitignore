@@ -2,4 +2,5 @@ venv/
 __pycache__/
 *.pyc
 .env
-echo "db.sqlite3" >> .gitignore
+static/
+db.sqlite3
